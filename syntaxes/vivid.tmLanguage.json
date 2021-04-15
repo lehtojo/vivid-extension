@@ -1,0 +1,96 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "Vivid",
+	"patterns": [
+		{ "include": "#comments" },
+		{ "include": "#constants" },
+		{ "include": "#keywords" },
+		{ "include": "#calls" },
+		{ "include": "#types" }
+	],
+	"repository": {
+		"comments": {
+			"patterns": [
+				{
+					"begin": "(^|[^#])###[^#]",
+					"end": "###",
+					"name": "comment.block"
+				},
+				{
+					"match": "(#|#\\s).*$",
+					"name": "comment.line"
+				},
+				{
+					"match": "(').*(')",
+					"name": "string.quoted.double"
+				},
+				{
+					"match": "(`).*(`)",
+					"name": "string.quoted.double"
+				}
+			]
+		},
+		"constants": {
+			"patterns": [
+				{
+					"name": "constant.numeric.floating-point",
+					"match": "\\b((([0-9\\_]+\\.[0-9\\_]*)(e[+-]?[0-9\\_]+)?|\\.?[0-9\\_]+e[+-]?[0-9\\_]+))\\b"
+				},
+				{
+					"name": "constant.numeric.literal",
+					"match": "(\\$0[0-9a-f]+)\\b"
+				},
+				{
+					"name": "constant.numeric.dec",
+					"match": "\\b((0d[0-9\\_]+)|([0-9\\_]+d?))\\b"
+				},
+				{
+					"name": "constant.numeric.hex",
+					"match": "\\b((0[xh][0-9a-fA-F\\_]+)|([0-9a-fA-F\\_]+[hH]))\\b"
+				}
+			]
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"name": "keyword.control.vivid",
+					"match": "\\b(and|or|allocate|as|continue|compiles|copy|deinit|else|export|fill|free|goto|has|if|import|in|init|inline|is|isolated|loop|merge|move|namespace|not|options|outline|private|protected|public|readonly|return|sizeof|static|stop|string|when|zero)\\b"
+				},
+				{
+					"name": "variable.vivid",
+					"match": "\\b(base|this|true|false|none)\\b"
+				}
+			]
+		},
+		"calls": {
+			"patterns": [
+				{
+					"match": "(\\w+)\\ *(\\()",
+					"captures": {
+						"1": {
+							"name": "entity.name.function"
+						}
+					}
+				},
+				{
+					"match": "(\\w+)\\ *:\\ *(\\w+)",
+					"captures": {
+						"1": {
+							"name": "entity.name.function"
+						},
+						"2": {
+							"name": "constant.vivid"
+						}
+					}
+				}
+			]
+		},
+		"types": {
+			"patterns": [{
+				"match": "\\b(bool|tiny|small|normal|large|decimal|i8|u8|i16|u16|i32|u32|i64|u64|link|l8|l16|l32|l64)\\b",
+				"name": "constant.vivid"
+			}]
+		}
+	},
+	"scopeName": "source.vivid"
+}
