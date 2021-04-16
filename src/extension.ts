@@ -9,7 +9,8 @@ enum RequestType {
 	Diagnose = 3,
 	Open = 4,
 	Definition = 5,
-	Information = 6
+	Information = 6,
+	FindReferences = 7
 }
 
 class CompilerService {
@@ -70,7 +71,7 @@ class CompletionItemProvider implements vscode.CompletionItemProvider {
 		this.service.send(RequestType.Completions, document, position)
 
 		return this.service.response()
-			.then(response => JSON.parse(response) as { Status: number, Uri: vscode.Uri, Data: string })
+			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
 			.then(response => {
 				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
 				if (response.Status == 0) {
@@ -104,7 +105,7 @@ class SignatureHelpProvider implements vscode.SignatureHelpProvider {
 		this.service.send(RequestType.Signatures, document, position)
 
 		return this.service.response()
-			.then(response => JSON.parse(response) as { Status: number, Uri: vscode.Uri, Data: string })
+			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
 			.then(response => {
 				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
 				if (response.Status == 0) {
@@ -151,17 +152,15 @@ class DefinitionProvider implements vscode.DefinitionProvider {
 		this.service.send(RequestType.Definition, document, position)
 		
 		return this.service.response()
-			.then(response => JSON.parse(response) as { Status: number, Uri: vscode.Uri, Data: string })
+			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
 			.then(response => {
 				// If the response code is zero, it means the request has succeeded, and that there should be the location of the definition included
 				if (response.Status == 0) {
-					const location = JSON.parse(response.Data) as { Start: { Line: number, Character: number }, End: { Line: number, Character: number } }
+					const location = JSON.parse(response.Data) as DocumentRange
 					const start = new vscode.Position(location.Start.Line, location.Start.Character)
 					const end = new vscode.Position(location.End.Line, location.End.Character)
-
-					var text = response.Uri.toString()
 					
-					return new vscode.Location(vscode.Uri.parse(text), new vscode.Range(start, end))
+					return new vscode.Location(vscode.Uri.parse(response.Uri), new vscode.Range(start, end))
 				}
 				
 				// Since the request has failed, check if there is an error message included to be shown to the user
@@ -189,7 +188,7 @@ class HoverProvider implements vscode.HoverProvider {
 		this.service.send(RequestType.Information, document, position)
 
 		return this.service.response()
-			.then(response => JSON.parse(response) as { Status: number, Uri: vscode.Uri, Data: string })
+			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
 			.then(response => {
 				// If the response code is zero, it means the request has succeeded, and that there should be information about the currently selected symbol included
 				if (response.Status == 0) {
@@ -209,17 +208,49 @@ class HoverProvider implements vscode.HoverProvider {
 	}
 }
 
-/**
- * Converts the specified 32-bit number into a byte array
- * @returns Byte array which represents the specified 32-bit number
- */
- function to_bytes(number: number) {
-	return new Uint8Array([
-		(number & 0xff000000) >> 24,
-		(number & 0x00ff0000) >> 16,
-		(number & 0x0000ff00) >> 8,
-		(number & 0x000000ff)
-	])
+class ReferenceProvider implements vscode.ReferenceProvider {
+	private service: CompilerService
+
+	/**
+	 * Creates a definition provider which helps the user to locate all usages of a variable or a function
+	 */
+	constructor(service: CompilerService) {
+		this.service = service
+	}
+
+	public provideReferences(document: vscode.TextDocument, position: vscode.Position, context: vscode.ReferenceContext, _: vscode.CancellationToken) {
+		this.service.send(RequestType.FindReferences, document, position)
+
+		return this.service.response()
+			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
+			.then(response => {
+				// If the response code is zero, it means the request has succeeded, and that there should be reference locations included
+				if (response.Status == 0) {
+					return JSON.parse(response.Data) as FileDivider[]
+				}
+				
+				// Since the request has failed, check if there is an error message included to be shown to the user
+				if (response.Data.length > 0) {
+					vscode.window.showErrorMessage(response.Data)
+				}
+				
+				return []
+			})
+			.then(files => {
+				const locations: vscode.Location[] = []
+
+				for (const file of files) {
+					const uri = vscode.Uri.parse(file.File)
+					const positions = JSON.parse(file.Data) as DocumentPosition[]
+
+					for (const position of positions) {
+						locations.push(new vscode.Location(uri, new vscode.Position(position.Line, position.Character)));
+					}
+				}
+
+				return locations
+			})
+	}
 }
 
 let diagnostics: vscode.DiagnosticCollection
@@ -270,6 +301,28 @@ class DocumentDiagnostic {
 		this.Range = range
 		this.Message = message
 		this.Severity = severity
+	}
+}
+
+class FileDivider {
+	File: string
+	Data: string
+
+	constructor(file: string, data: string) {
+		this.File = file
+		this.Data = data
+	}
+}
+
+class DocumentAnalysisResponse {
+	Status: number
+	Uri: string
+	Data: string
+
+	constructor(status: number, uri: string, data: string) {
+		this.Status = status
+		this.Uri = uri
+		this.Data = data
 	}
 }
 
@@ -403,6 +456,11 @@ function start_compiler_service(context: vscode.ExtensionContext, output: string
 	context.subscriptions.push(vscode.languages.registerHoverProvider(
 		{ language: 'vivid' },
 		new HoverProvider(specific_request_service)
+	))
+
+	context.subscriptions.push(vscode.languages.registerReferenceProvider(
+		{ language: 'vivid' },
+		new ReferenceProvider(specific_request_service)
 	))
 
 	diagnostics = vscode.languages.createDiagnosticCollection('vivid')
