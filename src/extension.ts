@@ -1,7 +1,6 @@
-import { createSocket, RemoteInfo, Socket, SocketType } from 'dgram';
+import { TextDecoder } from 'util'
 import * as vscode from 'vscode'
-import { SignatureHelp } from 'vscode';
-import { SignatureInformation } from 'vscode';
+import * as net from 'net'
 
 enum RequestType {
 	Completions = 1,
@@ -10,19 +9,83 @@ enum RequestType {
 	Open = 4,
 	Definition = 5,
 	Information = 6,
-	FindReferences = 7
+	FindReferences = 7,
+	WorkspaceSymbols = 8
+}
+
+const BUFFERED_SOCKET_CAPACITY = 10000000
+const BUFFERED_SOCKET_SLEEP_INTERVAL = 10
+
+class BufferedSocket {
+	private socket: net.Socket
+	private buffer: Uint8Array
+	private position: number = 0
+
+	constructor(on_error: (error: Error) => void) {
+		this.socket = new net.Socket({ writable: true, readable: true })
+		this.buffer = new Uint8Array(BUFFERED_SOCKET_CAPACITY)
+
+		// Copy the received fragments to the allocated buffer
+		this.socket.on('data', (data) => {
+			data.copy(this.buffer, this.position)
+			this.position += data.length
+		})
+
+		this.socket.on('error', on_error)
+		this.socket.on('end', () => console.log('Compiler service connection is now closed'))
+	}
+
+	connect(port: number, host?: string) {
+		return new Promise<void>((resolve, _) => {
+			this.socket.connect(port, host || '127.0.0.1', () => resolve())
+		})
+	}
+
+	async read(size: number) {
+		// Wait for the specified amount of bytes to arrive
+		while (this.position < size) {
+			// Sleep for 10ms, so that other tasks are executed
+			await new Promise((resolve, _) => setTimeout(resolve, BUFFERED_SOCKET_SLEEP_INTERVAL))
+		}
+
+		// Extract the requested part
+		const result = this.buffer.slice(0, size)
+
+		this.buffer.copyWithin(0, size) // Remove the received part
+		this.position -= size // Update the position, since we removed the received part
+
+		return result
+	}
+
+	write(data: string | Uint8Array) {
+		this.socket.write(data)
+	}
 }
 
 class CompilerService {
-	private socket: Socket
+	private socket: BufferedSocket
 	private port: number
 
 	/**
 	 * Creates a compiler service using the specified active socket and a port
 	 */
-	constructor(socket: Socket, port: number) {
+	constructor(socket: BufferedSocket, port: number) {
 		this.socket = socket
 		this.port = port
+	}
+
+	/**
+	 * Converts the specified number into four byte array
+	 */
+	int32_to_bytes(value: number) {
+		return new Uint8Array([ value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF ])
+	}
+
+	/**
+	 * Expects the specified byte array to have four bytes and converts them into a 32-bit number (little endian).
+	 */
+	bytes_to_int32(bytes: Uint8Array) {
+		return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)
 	}
 
 	/**
@@ -31,8 +94,15 @@ class CompilerService {
 	 * @param position The current position inside the specified document
 	 */
 	public send(request: RequestType, document: vscode.TextDocument, position: vscode.Position) {
-		const payload = JSON.stringify({ Type: request as number, Uri: document.uri.toString(), Document: document.getText(), Position: { Line: position.line, Character: position.character } })
-		this.socket.send(payload, this.port, "localhost")
+		const payload = JSON.stringify({ Type: request as number, Uri: document.uri.toString(true), Document: document.getText(), Position: { Line: position.line, Character: position.character } })
+		this.socket.write(this.int32_to_bytes(payload.length))
+		this.socket.write(payload)
+	}
+
+	public query(request: RequestType, query: string) {
+		const payload = JSON.stringify({ Type: request as number, Uri: '', Document: '', Position: { Line: -1, Character: -1 }, Query: query })
+		this.socket.write(this.int32_to_bytes(payload.length))
+		this.socket.write(payload)
 	}
 
 	/**
@@ -40,18 +110,28 @@ class CompilerService {
 	 */
 	public open(folder: string) {
 		const payload = JSON.stringify({ Type: RequestType.Open as number, Uri: folder, Document: '', Position: { Line: -1, Character: -1 } })
-		this.socket.send(payload, this.port, "localhost")
+		this.socket.write(this.int32_to_bytes(payload.length))
+		this.socket.write(payload)
 		return this.response()
 	}
 
 	/**
-	 * Creates a promise of a reponse in string format
+	 * Creates a promise of a response in string format
 	 */
 	public response() {
-		return new Promise<string>((resolve) => {
-			this.socket.once('message', (data: Buffer, _: RemoteInfo) => {
-				resolve(data.toString('utf-8'))
-			})
+		return new Promise<string>(async (resolve, reject) => {
+			// Wait for the size of the message to arrive
+			var buffer = await this.socket.read(4)
+
+			// Determine the size of the payload
+			const size = this.bytes_to_int32(buffer)
+			if (size <= 0 || size > 10000000) reject(new Error('Message has too large payload'))
+
+			// Wait for the message to arrive fully
+			buffer = await this.socket.read(size)
+
+			// Convert the received buffer into a string
+			resolve(new TextDecoder('utf-8').decode(buffer))
 		})
 	}
 }
@@ -60,7 +140,7 @@ class CompletionItemProvider implements vscode.CompletionItemProvider {
 	private service: CompilerService
 
 	/**
-	 * Creates a completion item provider which attempts to give the user autocompletions, using the specified compiler service
+	 * Creates a completion item provider which attempts to give the user auto-completions, using the specified compiler service
 	 */
 	constructor(service: CompilerService) {
 		this.service = service
@@ -77,12 +157,12 @@ class CompletionItemProvider implements vscode.CompletionItemProvider {
 				if (response.Status == 0) {
 					return JSON.parse(response.Data) as { Identifier: string, Type: number }[]
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				// Return an empty array of completion items, since no items could be produced
 				return []
 			})
@@ -111,23 +191,23 @@ class SignatureHelpProvider implements vscode.SignatureHelpProvider {
 				if (response.Status == 0) {
 					return JSON.parse(response.Data) as { Identifier: string, Documentation: string, Parameters: { Name: string, Documentation: string }[] }[]
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				// Return an empty array of completion items, since no items could be produced
 				return []
 			})
 			.then(items => items.map(i => {
-				const signature = new SignatureInformation(i.Identifier, i.Documentation)
+				const signature = new vscode.SignatureInformation(i.Identifier, i.Documentation)
 				signature.parameters = i.Parameters.map(i => new vscode.ParameterInformation(i.Name, i.Documentation))
-				
+
 				return signature
 			}))
 			.then(signatures => {
-				const result = new SignatureHelp()
+				const result = new vscode.SignatureHelp()
 				result.signatures = signatures
 				result.activeParameter = 0
 				result.activeSignature = 0
@@ -150,7 +230,7 @@ class DefinitionProvider implements vscode.DefinitionProvider {
 	public provideDefinition(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
 		// Request the definition location of the current position from the compiler service
 		this.service.send(RequestType.Definition, document, position)
-		
+
 		return this.service.response()
 			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
 			.then(response => {
@@ -159,15 +239,15 @@ class DefinitionProvider implements vscode.DefinitionProvider {
 					const location = JSON.parse(response.Data) as DocumentRange
 					const start = new vscode.Position(location.Start.Line, location.Start.Character)
 					const end = new vscode.Position(location.End.Line, location.End.Character)
-					
+
 					return new vscode.Location(vscode.Uri.parse(response.Uri), new vscode.Range(start, end))
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				return new vscode.Location(document.uri, position)
 			})
 	}
@@ -193,16 +273,16 @@ class HoverProvider implements vscode.HoverProvider {
 				// If the response code is zero, it means the request has succeeded, and that there should be information about the currently selected symbol included
 				if (response.Status == 0) {
 					const markdown = new vscode.MarkdownString()
-					markdown.appendCodeblock(response.Data, 'vivid')
+					markdown.appendCodeblock(JSON.parse(response.Data), 'vivid')
 
 					return new vscode.Hover(markdown, undefined)
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				return new vscode.Hover('', undefined)
 			})
 	}
@@ -228,12 +308,12 @@ class ReferenceProvider implements vscode.ReferenceProvider {
 				if (response.Status == 0) {
 					return JSON.parse(response.Data) as FileDivider[]
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				return []
 			})
 			.then(files => {
@@ -250,6 +330,44 @@ class ReferenceProvider implements vscode.ReferenceProvider {
 
 				return locations
 			})
+	}
+}
+
+class WorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
+	private service: CompilerService
+
+	constructor(service: CompilerService) {
+		this.service = service
+	}
+
+	async provideWorkspaceSymbols(query: string, token: vscode.CancellationToken): Promise<vscode.SymbolInformation[]> {
+		// Request symbol information with the specified query
+		this.service.query(RequestType.WorkspaceSymbols, query)
+
+		// Wait for the response of the query
+		const response = JSON.parse(await this.service.response()) as DocumentAnalysisResponse
+
+		// If the response code is zero, it means the request has succeeded, and that there should be reference locations included
+		if (response.Status != 0) {
+			// Since the request has failed, check if there is an error message included to be shown to the user
+			if (response.Data.length > 0) vscode.window.showErrorMessage(response.Data)
+			return []
+		}
+
+		const files = JSON.parse(response.Data) as FileDivider[]
+		const result = []
+
+		for (const file of files) {
+			const symbols = JSON.parse(file.Data)
+			const uri = vscode.Uri.parse(file.File)
+
+			for (const symbol of symbols) {
+				const position = to_internal_position(symbol.Position)
+				result.push(new vscode.SymbolInformation(symbol.Name, symbol.Kind, symbol.Container, new vscode.Location(uri, position)))
+			}
+		}
+
+		return result
 	}
 }
 
@@ -340,14 +458,14 @@ function to_internal_diagnostic(diagnostic: DocumentDiagnostic) {
 
 function create_diagnostics_handler(diagnostics_service: CompilerService) {
 	var previous = new Date()
-	var document: vscode.TextDocument 
+	var document: vscode.TextDocument
 	var diagnose = false
 	var is_diagnosed = true
 
 	// Creat the timer which decides whether to send the request to get the diagnostics
 	setInterval(() => {
 		let now = new Date()
-		
+
 		// If diagnostics are required or 500 milliseconds has elapsed and previous diagnostics have arrived, ask for diagnostics
 		if (!diagnose && now.getTime() - previous.getTime() < MAXIMUM_DIAGNOSTICS_DELAY) {
 			return
@@ -374,12 +492,12 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 					let uri = vscode.Uri.parse(response.Uri)
 					return { Uri: uri, Items: JSON.parse(response.Data) as DocumentDiagnostic[] }
 				}
-				
+
 				// Since the request has failed, check if there is an error message included to be shown to the user
 				if (response.Data.length > 0) {
 					vscode.window.showErrorMessage(response.Data)
 				}
-				
+
 				// Return an empty array of completion items, since no items could be produced
 				return {}
 			})
@@ -400,11 +518,11 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 		for (let change of event.contentChanges) {
 			for (let i = 0; i < change.text.length; i++) {
 				let c = change.text.charAt(i)
-				
+
 				if (is_alphabet(c) || is_digit(c) || c == ' ') {
 					continue
 				}
-				
+
 				document = event.document
 				diagnose = true
 			}
@@ -415,52 +533,75 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 /**
  * Starts all operations using the output of the compiler service
  */
-function start_compiler_service(context: vscode.ExtensionContext, output: string) {
+async function start_compiler_service(context: vscode.ExtensionContext, output: string) {
 	console.log('Vivid compiler service is active!')
-		
-	const specified_request_port = parseInt(output)
-	const specific_request_socket = createSocket('udp4')
-	const diagnostics_socket = createSocket('udp4')
+
+	const detail_provider_port = 1111 // parseInt(output)
+
+	const detail_provider = new BufferedSocket((error) => {
+		if (error.message.includes('ECONNREFUSED')) {
+			vscode.window.showErrorMessage('Vivid: Failed to connect to the compiler service')
+		}
+
+		console.error(`Compiler service connection error: ${error}`)
+	})
+
+	const diagnostics_provider = new BufferedSocket((error) => {
+		if (error.message.includes('ECONNREFUSED')) {
+			vscode.window.showErrorMessage('Vivid: Failed to connect to the compiler service')
+		}
+
+		console.error(`Compiler service connection error: ${error}`)
+	})
+
+	console.log('Connecting to the compiler service...')
+
+	await detail_provider.connect(1111)
+	await diagnostics_provider.connect(2222)
 
 	console.log('Registering the completion item provider...')
-	
+
 	// Create a compiler service and add a completion item provider which uses it
-	const specific_request_service = new CompilerService(specific_request_socket, 1111)
-	const diagnostics_service = new CompilerService(diagnostics_socket, 2222)
-	
+	const detail_service = new CompilerService(detail_provider, 1111)
+	const diagnostics_service = new CompilerService(diagnostics_provider, 2222)
+
 	// Open the current workspace
 	const folder = vscode.workspace.workspaceFolders?.map(i => i.uri.path)[0] ?? '';
-	Promise.all([ specific_request_service.open(folder), diagnostics_service.open(folder) ]).catch(() => {
+	Promise.all([ detail_service.open(folder), diagnostics_service.open(folder) ]).catch(() => {
 		vscode.window.showErrorMessage('Compiler services could not open the current workspace', { modal: true })
 	});
 
 	context.subscriptions.push(vscode.languages.registerCompletionItemProvider(
 		{ language: 'vivid' },
-		new CompletionItemProvider(specific_request_service),
-		'.', 
+		new CompletionItemProvider(detail_service),
+		'.',
 		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
 	))
 
 	context.subscriptions.push(vscode.languages.registerSignatureHelpProvider(
 		{ language: 'vivid' },
-		new SignatureHelpProvider(specific_request_service),
+		new SignatureHelpProvider(detail_service),
 		'(', ','
 	))
 
 	context.subscriptions.push(vscode.languages.registerDefinitionProvider(
 		{ language: 'vivid' },
-		new DefinitionProvider(specific_request_service)
+		new DefinitionProvider(detail_service)
 	))
 
 	context.subscriptions.push(vscode.languages.registerHoverProvider(
 		{ language: 'vivid' },
-		new HoverProvider(specific_request_service)
+		new HoverProvider(detail_service)
 	))
 
 	context.subscriptions.push(vscode.languages.registerReferenceProvider(
 		{ language: 'vivid' },
-		new ReferenceProvider(specific_request_service)
+		new ReferenceProvider(detail_service)
+	))
+
+	context.subscriptions.push(vscode.languages.registerWorkspaceSymbolProvider(
+		new WorkspaceSymbolProvider(detail_service)
 	))
 
 	diagnostics = vscode.languages.createDiagnosticCollection('vivid')
@@ -480,7 +621,7 @@ function execute_compiler_service(context: vscode.ExtensionContext) {
 
 	if (service.pid == undefined) {
 		console.log('Could not start Vivid compiler service')
-		
+
 		vscode.window.showErrorMessage('Could not start Vivid compiler service. Is the Vivid compiler installed on your system and is it visible to this extension?', { modal: true })
 		return
 	}
@@ -496,7 +637,7 @@ function execute_compiler_service(context: vscode.ExtensionContext) {
  * This function activates the whole extension
  */
 export function activate(context: vscode.ExtensionContext) {
-	console.log('Vivid languange extension starting...')
+	console.log('Vivid language extension starting...')
 
 	//execute_compiler_service(context)
 	start_compiler_service(context, "1111")
