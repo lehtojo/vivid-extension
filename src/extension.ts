@@ -240,7 +240,7 @@ class DefinitionProvider implements vscode.DefinitionProvider {
 					const start = new vscode.Position(location.Start.Line, location.Start.Character)
 					const end = new vscode.Position(location.End.Line, location.End.Character)
 
-					return new vscode.Location(vscode.Uri.parse(response.Uri), new vscode.Range(start, end))
+					return new vscode.Location(vscode.Uri.file(response.Path), new vscode.Range(start, end))
 				}
 
 				// Since the request has failed, check if there is an error message included to be shown to the user
@@ -434,12 +434,12 @@ class FileDivider {
 
 class DocumentAnalysisResponse {
 	Status: number
-	Uri: string
+	Path: string
 	Data: string
 
-	constructor(status: number, uri: string, data: string) {
+	constructor(status: number, path: string, data: string) {
 		this.Status = status
-		this.Uri = uri
+		this.Path = path
 		this.Data = data
 	}
 }
@@ -483,13 +483,13 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 
 		// Handle the response from the diagnostics service
 		diagnostics_service.response()
-			.then(response => JSON.parse(response) as { Status: number, Uri: string, Data: string })
+			.then(response => JSON.parse(response) as { Status: number, Path: string, Data: string })
 			.then(response => {
 				is_diagnosed = true
 
 				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
 				if (response.Status == 0) {
-					let uri = vscode.Uri.parse(response.Uri)
+					let uri = vscode.Uri.file(response.Path)
 					return { Uri: uri, Items: JSON.parse(response.Data) as DocumentDiagnostic[] }
 				}
 
