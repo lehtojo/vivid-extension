@@ -1,4 +1,4 @@
-import { TextDecoder } from 'util'
+import { TextDecoder, TextEncoder } from 'util'
 import * as vscode from 'vscode'
 import * as net from 'net'
 
@@ -13,26 +13,107 @@ enum RequestType {
 	WorkspaceSymbols = 8
 }
 
-const BUFFERED_SOCKET_CAPACITY = 10000000
+const RECEIVE_BUFFER_SIZE = 10000000
+const MESSAGE_HEADER_SIZE = 8
+const MAX_MESSAGE_SIZE = RECEIVE_BUFFER_SIZE - MESSAGE_HEADER_SIZE
+
 const BUFFERED_SOCKET_SLEEP_INTERVAL = 10
+
+/**
+ * Converts the specified number into four byte array
+ */
+function int32_to_bytes(value: number) {
+	return new Uint8Array([ value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF ])
+}
+
+/**
+ * Expects the specified byte array to have four bytes and converts them into a 32-bit number (little endian).
+ */
+function bytes_to_int32(bytes: Uint8Array, offset?: number) {
+	offset = offset || 0
+	return bytes[offset + 0] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+}
+
+/**
+ * Converts the specified bytes into UTF-8 string
+ */
+function bytes_to_string(bytes: Uint8Array): string {
+	return new TextDecoder().decode(bytes)
+}
+
+function to_response(bytes: Uint8Array): DocumentAnalysisResponse {
+	const response = JSON.parse(bytes_to_string(bytes))
+
+	if (response.Status !== 0) {
+		// Display the error message and throw an error
+		vscode.window.showErrorMessage(response.Data)
+		throw new Error('Received an error response from the compiler service')
+	}
+
+	return response
+}
+
+type ReceiveCallback = (bytes: Uint8Array) => void
 
 class BufferedSocket {
 	private socket: net.Socket
 	private buffer: Uint8Array
 	private position: number = 0
 
+	private receivers: Map<number, ReceiveCallback> = new Map<number, ReceiveCallback>()
+	private id: number = 0
+
 	constructor(on_error: (error: Error) => void) {
 		this.socket = new net.Socket({ writable: true, readable: true })
-		this.buffer = new Uint8Array(BUFFERED_SOCKET_CAPACITY)
+		this.buffer = new Uint8Array(RECEIVE_BUFFER_SIZE)
 
-		// Copy the received fragments to the allocated buffer
 		this.socket.on('data', (data) => {
+			// Add the received fragment
 			data.copy(this.buffer, this.position)
 			this.position += data.length
+
+			this.on_data_received()
 		})
 
 		this.socket.on('error', on_error)
 		this.socket.on('end', () => console.log('Compiler service connection is now closed'))
+	}
+
+	on_data_received() {
+		// Wait for the size of the message to arrive
+		if (this.position < MESSAGE_HEADER_SIZE) return
+
+		const size = bytes_to_int32(this.buffer)
+		const id = bytes_to_int32(this.buffer, 4)
+
+		// Validate the size
+		if (size < 0 || size > MAX_MESSAGE_SIZE) {
+			this.position = 0 // Prepare for another message
+			// TODO: Reconnect? The next bytes might contain garbage so recovering is very difficult without knowing the real message size.
+			return
+		}
+
+		// Wait until the message is received
+		const received = this.position - MESSAGE_HEADER_SIZE
+		if (received < size) return
+
+		// Move the overflowed bytes (start of another message) to the start
+		this.buffer.copyWithin(0, MESSAGE_HEADER_SIZE + size, this.position)
+		this.position -= MESSAGE_HEADER_SIZE + size
+
+		const receiver = this.receivers.get(id)
+
+		// Remove the receiver, since the message is now received
+		this.receivers.delete(id)
+
+		if (receiver !== undefined) {
+			// Extract the message from the receive buffer
+			const message = this.buffer.slice(MESSAGE_HEADER_SIZE, MESSAGE_HEADER_SIZE + size)
+			receiver(message)
+		}
+
+		// If we received part of the next message, start processing it
+		if (this.position > 0) this.on_data_received()
 	}
 
 	connect(port: number, host?: string) {
@@ -41,24 +122,21 @@ class BufferedSocket {
 		})
 	}
 
-	async read(size: number) {
-		// Wait for the specified amount of bytes to arrive
-		while (this.position < size) {
-			// Sleep for 10ms, so that other tasks are executed
-			await new Promise((resolve, _) => setTimeout(resolve, BUFFERED_SOCKET_SLEEP_INTERVAL))
-		}
-
-		// Extract the requested part
-		const result = this.buffer.slice(0, size)
-
-		this.buffer.copyWithin(0, size) // Remove the received part
-		this.position -= size // Update the position, since we removed the received part
-
-		return result
+	receive(id: number): Promise<Uint8Array> {
+		return new Promise((resolve, reject) => {
+			this.receivers.set(id, resolve)
+		})
 	}
 
-	write(data: string | Uint8Array) {
-		this.socket.write(data)
+	send_bytes(data: Uint8Array) {
+		const id = this.id++
+		this.socket.write(Buffer.concat([ int32_to_bytes(data.length), int32_to_bytes(id), data ]))
+
+		return this.receive(id)
+	}
+
+	send_string(value: string) {
+		return this.send_bytes(new TextEncoder().encode(value))
 	}
 }
 
@@ -75,34 +153,18 @@ class CompilerService {
 	}
 
 	/**
-	 * Converts the specified number into four byte array
-	 */
-	int32_to_bytes(value: number) {
-		return new Uint8Array([ value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF ])
-	}
-
-	/**
-	 * Expects the specified byte array to have four bytes and converts them into a 32-bit number (little endian).
-	 */
-	bytes_to_int32(bytes: Uint8Array) {
-		return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)
-	}
-
-	/**
 	 * Bundles the specified document with the specified position and sends it using the socket
 	 * @param document Contents of the current document as a string
 	 * @param position The current position inside the specified document
 	 */
 	public send(request: RequestType, document: vscode.TextDocument, position: vscode.Position) {
 		const payload = JSON.stringify({ Type: request as number, Uri: document.uri.toString(true), Document: document.getText(), Position: { Line: position.line, Character: position.character } })
-		this.socket.write(this.int32_to_bytes(payload.length))
-		this.socket.write(payload)
+		return this.socket.send_string(payload)
 	}
 
 	public query(request: RequestType, query: string) {
 		const payload = JSON.stringify({ Type: request as number, Uri: '', Document: '', Position: { Line: -1, Character: -1 }, Query: query })
-		this.socket.write(this.int32_to_bytes(payload.length))
-		this.socket.write(payload)
+		return this.socket.send_string(payload)
 	}
 
 	/**
@@ -110,29 +172,7 @@ class CompilerService {
 	 */
 	public open(folder: string) {
 		const payload = JSON.stringify({ Type: RequestType.Open as number, Uri: folder, Document: '', Position: { Line: -1, Character: -1 } })
-		this.socket.write(this.int32_to_bytes(payload.length))
-		this.socket.write(payload)
-		return this.response()
-	}
-
-	/**
-	 * Creates a promise of a response in string format
-	 */
-	public response() {
-		return new Promise<string>(async (resolve, reject) => {
-			// Wait for the size of the message to arrive
-			var buffer = await this.socket.read(4)
-
-			// Determine the size of the payload
-			const size = this.bytes_to_int32(buffer)
-			if (size <= 0 || size > 10000000) reject(new Error('Message has too large payload'))
-
-			// Wait for the message to arrive fully
-			buffer = await this.socket.read(size)
-
-			// Convert the received buffer into a string
-			resolve(new TextDecoder('utf-8').decode(buffer))
-		})
+		return this.socket.send_string(payload)
 	}
 }
 
@@ -146,27 +186,13 @@ class CompletionItemProvider implements vscode.CompletionItemProvider {
 		this.service = service
 	}
 
-	public provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) : Promise<vscode.CompletionItem[]> {
-		// Send the current state of the document to the compiler service, which will analyze it
-		this.service.send(RequestType.Completions, document, position)
+	public async provideCompletionItems(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) : Promise<vscode.CompletionItem[]> {
+		const bytes = await this.service.send(RequestType.Completions, document, position)
+		const response = to_response(bytes)
 
-		return this.service.response()
-			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
-			.then(response => {
-				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
-				if (response.Status == 0) {
-					return JSON.parse(response.Data) as { Identifier: string, Type: number }[]
-				}
+		const items = JSON.parse(response.Data) as { Identifier: string, Type: number }[]
 
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
-
-				// Return an empty array of completion items, since no items could be produced
-				return []
-			})
-			.then(items => items.map(i => new vscode.CompletionItem(i.Identifier, i.Type)))
+		return items.map(i => new vscode.CompletionItem(i.Identifier, i.Type))
 	}
 }
 
@@ -180,40 +206,25 @@ class SignatureHelpProvider implements vscode.SignatureHelpProvider {
 		this.service = service
 	}
 
-	public provideSignatureHelp(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
-		// Send the current state of the document to the compiler service, which will analyze it
-		this.service.send(RequestType.Signatures, document, position)
+	public async provideSignatureHelp(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
+		const bytes = await this.service.send(RequestType.Signatures, document, position)
+		const response = to_response(bytes)
 
-		return this.service.response()
-			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
-			.then(response => {
-				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
-				if (response.Status == 0) {
-					return JSON.parse(response.Data) as { Identifier: string, Documentation: string, Parameters: { Name: string, Documentation: string }[] }[]
-				}
+		const items = JSON.parse(response.Data) as { Identifier: string, Documentation: string, Parameters: { Name: string, Documentation: string }[] }[]
 
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
+		const signatures = items.map(i => {
+			const signature = new vscode.SignatureInformation(i.Identifier, i.Documentation)
+			signature.parameters = i.Parameters.map(i => new vscode.ParameterInformation(i.Name, i.Documentation))
 
-				// Return an empty array of completion items, since no items could be produced
-				return []
-			})
-			.then(items => items.map(i => {
-				const signature = new vscode.SignatureInformation(i.Identifier, i.Documentation)
-				signature.parameters = i.Parameters.map(i => new vscode.ParameterInformation(i.Name, i.Documentation))
+			return signature
+		})
 
-				return signature
-			}))
-			.then(signatures => {
-				const result = new vscode.SignatureHelp()
-				result.signatures = signatures
-				result.activeParameter = 0
-				result.activeSignature = 0
+		const result = new vscode.SignatureHelp()
+		result.signatures = signatures
+		result.activeParameter = 0
+		result.activeSignature = 0
 
-				return result
-			})
+		return result
 	}
 }
 
@@ -227,29 +238,15 @@ class DefinitionProvider implements vscode.DefinitionProvider {
 		this.service = service
 	}
 
-	public provideDefinition(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
-		// Request the definition location of the current position from the compiler service
-		this.service.send(RequestType.Definition, document, position)
+	public async provideDefinition(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
+		const bytes = await this.service.send(RequestType.Definition, document, position)
+		const response = to_response(bytes)
 
-		return this.service.response()
-			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
-			.then(response => {
-				// If the response code is zero, it means the request has succeeded, and that there should be the location of the definition included
-				if (response.Status == 0) {
-					const location = JSON.parse(response.Data) as DocumentRange
-					const start = new vscode.Position(location.Start.Line, location.Start.Character)
-					const end = new vscode.Position(location.End.Line, location.End.Character)
+		const range = JSON.parse(response.Data) as DocumentRange
+		const start = new vscode.Position(range.Start.Line, range.Start.Character)
+		const end = new vscode.Position(range.End.Line, range.End.Character)
 
-					return new vscode.Location(vscode.Uri.file(response.Path), new vscode.Range(start, end))
-				}
-
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
-
-				return new vscode.Location(document.uri, position)
-			})
+		return new vscode.Location(vscode.Uri.file(response.Path), new vscode.Range(start, end))
 	}
 }
 
@@ -263,28 +260,14 @@ class HoverProvider implements vscode.HoverProvider {
 		this.service = service
 	}
 
-	public provideHover(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
-		// Request the information about the currently selected symbol
-		this.service.send(RequestType.Information, document, position)
+	public async provideHover(document: vscode.TextDocument, position: vscode.Position, _: vscode.CancellationToken) {
+		const bytes = await this.service.send(RequestType.Information, document, position)
+		const response = to_response(bytes)
 
-		return this.service.response()
-			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
-			.then(response => {
-				// If the response code is zero, it means the request has succeeded, and that there should be information about the currently selected symbol included
-				if (response.Status == 0) {
-					const markdown = new vscode.MarkdownString()
-					markdown.appendCodeblock(JSON.parse(response.Data), 'vivid')
+		const markdown = new vscode.MarkdownString()
+		markdown.appendCodeblock(JSON.parse(response.Data), 'vivid')
 
-					return new vscode.Hover(markdown, undefined)
-				}
-
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
-
-				return new vscode.Hover('', undefined)
-			})
+		return new vscode.Hover(markdown, undefined)
 	}
 }
 
@@ -298,38 +281,24 @@ class ReferenceProvider implements vscode.ReferenceProvider {
 		this.service = service
 	}
 
-	public provideReferences(document: vscode.TextDocument, position: vscode.Position, context: vscode.ReferenceContext, _: vscode.CancellationToken) {
-		this.service.send(RequestType.FindReferences, document, position)
+	public async provideReferences(document: vscode.TextDocument, position: vscode.Position, context: vscode.ReferenceContext, _: vscode.CancellationToken) {
+		const bytes = await this.service.send(RequestType.FindReferences, document, position)
+		const response = to_response(bytes)
 
-		return this.service.response()
-			.then(response => JSON.parse(response) as DocumentAnalysisResponse)
-			.then(response => {
-				// If the response code is zero, it means the request has succeeded, and that there should be reference locations included
-				if (response.Status == 0) {
-					return JSON.parse(response.Data) as FileDivider[]
-				}
+		const files = JSON.parse(response.Data) as FileDivider[]
 
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
+		const locations: vscode.Location[] = []
 
-				return []
-			})
-			.then(files => {
-				const locations: vscode.Location[] = []
+		for (const file of files) {
+			const uri = vscode.Uri.parse(file.File)
+			const positions = JSON.parse(file.Data) as DocumentPosition[]
 
-				for (const file of files) {
-					const uri = vscode.Uri.parse(file.File)
-					const positions = JSON.parse(file.Data) as DocumentPosition[]
+			for (const position of positions) {
+				locations.push(new vscode.Location(uri, new vscode.Position(position.Line, position.Character)));
+			}
+		}
 
-					for (const position of positions) {
-						locations.push(new vscode.Location(uri, new vscode.Position(position.Line, position.Character)));
-					}
-				}
-
-				return locations
-			})
+		return locations
 	}
 }
 
@@ -340,19 +309,9 @@ class WorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
 		this.service = service
 	}
 
-	async provideWorkspaceSymbols(query: string, token: vscode.CancellationToken): Promise<vscode.SymbolInformation[]> {
-		// Request symbol information with the specified query
-		this.service.query(RequestType.WorkspaceSymbols, query)
-
-		// Wait for the response of the query
-		const response = JSON.parse(await this.service.response()) as DocumentAnalysisResponse
-
-		// If the response code is zero, it means the request has succeeded, and that there should be reference locations included
-		if (response.Status != 0) {
-			// Since the request has failed, check if there is an error message included to be shown to the user
-			if (response.Data.length > 0) vscode.window.showErrorMessage(response.Data)
-			return []
-		}
+	public async provideWorkspaceSymbols(query: string, token: vscode.CancellationToken): Promise<vscode.SymbolInformation[]> {
+		const bytes = await this.service.query(RequestType.WorkspaceSymbols, query)
+		const response = to_response(bytes)
 
 		const files = JSON.parse(response.Data) as FileDivider[]
 		const result = []
@@ -463,52 +422,34 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 	var is_diagnosed = true
 
 	// Creat the timer which decides whether to send the request to get the diagnostics
-	setInterval(() => {
-		let now = new Date()
+	setInterval(async () => {
+		const now = new Date()
 
 		// If diagnostics are required or 500 milliseconds has elapsed and previous diagnostics have arrived, ask for diagnostics
-		if (!diagnose && now.getTime() - previous.getTime() < MAXIMUM_DIAGNOSTICS_DELAY) {
-			return
-		}
+		if (!diagnose && now.getTime() - previous.getTime() < MAXIMUM_DIAGNOSTICS_DELAY) return
 
-		if (!is_diagnosed || document == undefined) {
-			return
-		}
+		// 1. Wait until the previous diagnostics arrive
+		// 2. Document content must be valid
+		if (!is_diagnosed || document === undefined) return
 
 		diagnose = false
 		previous = now
 		is_diagnosed = false
 
-		diagnostics_service.send(RequestType.Diagnose, document, new vscode.Position(0, 0))
+		try {
+			const bytes = await diagnostics_service.send(RequestType.Diagnose, document, new vscode.Position(0, 0))
+			const response = to_response(bytes)
 
-		// Handle the response from the diagnostics service
-		diagnostics_service.response()
-			.then(response => JSON.parse(response) as { Status: number, Path: string, Data: string })
-			.then(response => {
-				is_diagnosed = true
+			const uri = vscode.Uri.file(response.Path)
+			const items = JSON.parse(response.Data) as DocumentDiagnostic[]
 
-				// If the response code is zero, it means the request has succeeded, and that there should be an array of completion items included
-				if (response.Status == 0) {
-					let uri = vscode.Uri.file(response.Path)
-					return { Uri: uri, Items: JSON.parse(response.Data) as DocumentDiagnostic[] }
-				}
+			if (uri === undefined || items === undefined) return
 
-				// Since the request has failed, check if there is an error message included to be shown to the user
-				if (response.Data.length > 0) {
-					vscode.window.showErrorMessage(response.Data)
-				}
+			diagnostics.set(uri, items.map(i => to_internal_diagnostic(i)))
+		}
+		catch {}
 
-				// Return an empty array of completion items, since no items could be produced
-				return {}
-			})
-			.then(response => {
-				if (response?.Uri == undefined || response.Items == undefined) {
-					return
-				}
-
-				var items = response.Items.map(i => to_internal_diagnostic(i))
-				diagnostics.set(response.Uri, items)
-			})
+		is_diagnosed = true
 
 	}, DIAGNOSTICS_TIMER_PRECISION)
 
