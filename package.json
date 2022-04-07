@@ -1,8 +1,11 @@
 {
 	"name": "vivid",
+	"author": "lehtojo",
+	"publisher": "lehtojo",
 	"displayName": "Vivid",
-	"description": "Vivid Languange Extension",
-	"version": "0.0.1",
+	"description": "Vivid language extension",
+	"repository": "https://github.com/lehtojo/vivid-extension",
+	"version": "1.0.0",
 	"engines": {
 		"vscode": "^1.54.0"
 	},
@@ -36,8 +39,12 @@
 		],
 		"commands": [
 			{
-				"command": "extension.hello",
-				"title": "Say hello!"
+				"command": "vivid.enable-diagnostics",
+				"title": "Vivid: Enable diagnostics"
+			},
+			{
+				"command": "vivid.disable-diagnostics",
+				"title": "Vivid: Disable diagnostics"
 			}
 		]
 	},
@@ -54,8 +61,5 @@
 		"@typescript-eslint/parser": "^4.16.0",
 		"eslint": "^7.21.0",
 		"typescript": "^4.2.2"
-	},
-	"dependencies": {
-		"net": "^1.0.2"
 	}
 }

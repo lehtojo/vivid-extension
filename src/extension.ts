@@ -1,5 +1,7 @@
 import { TextDecoder, TextEncoder } from 'util'
+import { promises as fs } from 'fs'
 import * as vscode from 'vscode'
+import * as path from 'path'
 import * as net from 'net'
 
 enum RequestType {
@@ -13,11 +15,24 @@ enum RequestType {
 	WorkspaceSymbols = 8
 }
 
+const DEBUG = false
+const DEBUG_PORTS_OUTPUT = 'Ports: 1111, 2222'
+
 const RECEIVE_BUFFER_SIZE = 10000000
 const MESSAGE_HEADER_SIZE = 8
 const MAX_MESSAGE_SIZE = RECEIVE_BUFFER_SIZE - MESSAGE_HEADER_SIZE
 
-const BUFFERED_SOCKET_SLEEP_INTERVAL = 10
+const COMPILER_FILE_NAME_WITHOUT_EXTENSION = 'Vivid'
+const COMPILER_HOME_PAGE = 'https://github.com/lehtojo/vivid'
+
+var CompilerPath = null
+
+/**
+ * Resolves after the specified amount of milliseconds
+ */
+function sleep(milliseconds: number) {
+	return new Promise((resolve, reject) => setTimeout(resolve, milliseconds))
+}
 
 /**
  * Converts the specified number into four byte array
@@ -294,7 +309,7 @@ class ReferenceProvider implements vscode.ReferenceProvider {
 			const positions = JSON.parse(file.Data) as DocumentPosition[]
 
 			for (const position of positions) {
-				locations.push(new vscode.Location(uri, new vscode.Position(position.Line, position.Character)));
+				locations.push(new vscode.Location(uri, new vscode.Position(position.Line, position.Character)))
 			}
 		}
 
@@ -330,20 +345,21 @@ class WorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
 	}
 }
 
-let diagnostics: vscode.DiagnosticCollection
+var diagnostics: vscode.DiagnosticCollection
+var is_diagnostics_enabled = true
 
 /**
  * Returns whether the specified character is a character
  */
 function is_alphabet(character: string) {
-	return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+	return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z')
 }
 
 /**
  * Returns whether the specified character is a digit
  */
 function is_digit(character: string) {
-	return character >= '0' && character <= '9';
+	return character >= '0' && character <= '9'
 }
 
 const DIAGNOSTICS_TIMER_PRECISION = 100
@@ -423,6 +439,8 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 
 	// Creat the timer which decides whether to send the request to get the diagnostics
 	setInterval(async () => {
+		if (!is_diagnostics_enabled) return
+
 		const now = new Date()
 
 		// If diagnostics are required or 500 milliseconds has elapsed and previous diagnostics have arrived, ask for diagnostics
@@ -472,16 +490,36 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 }
 
 /**
+ * Extracts the port numbers from the specified output as an array.
+ * Output: 'Ports: 1111, 2222, 3333'
+ * Result: [ 1111, 2222, 3333 ]
+ */
+function get_ports_from_output(output: string) {
+	// Skip the 'Ports:' part
+	const start = output.indexOf(':')
+	if (start < 0) throw new Error('Invalid output')
+
+	// We want the first line only
+	var end = output.indexOf('\n')
+	if (end < 0) { end = output.length }
+
+	return JSON.parse('[ ' + output.slice(start + 1, end).trim() + ' ]')
+}
+
+/**
  * Starts all operations using the output of the compiler service
  */
 async function start_compiler_service(context: vscode.ExtensionContext, output: string) {
 	console.log('Vivid compiler service is active!')
 
-	const detail_provider_port = 1111 // parseInt(output)
+	const ports = get_ports_from_output(output)
 
 	const detail_provider = new BufferedSocket((error) => {
 		if (error.message.includes('ECONNREFUSED')) {
-			vscode.window.showErrorMessage('Vivid: Failed to connect to the compiler service')
+			vscode.window.showErrorMessage('Failed to connect to the compiler service', 'OK')
+		}
+		else if (error.message.includes('ECONNRESET')) {
+			vscode.window.showErrorMessage('Something went wrong with the connection to the compiler service', 'OK')
 		}
 
 		console.error(`Compiler service connection error: ${error}`)
@@ -489,7 +527,10 @@ async function start_compiler_service(context: vscode.ExtensionContext, output: 
 
 	const diagnostics_provider = new BufferedSocket((error) => {
 		if (error.message.includes('ECONNREFUSED')) {
-			vscode.window.showErrorMessage('Vivid: Failed to connect to the compiler service')
+			vscode.window.showErrorMessage('Failed to connect to the compiler service', 'OK')
+		}
+		else if (error.message.includes('ECONNRESET')) {
+			vscode.window.showErrorMessage('Something went wrong with the connection to the compiler service', 'OK')
 		}
 
 		console.error(`Compiler service connection error: ${error}`)
@@ -497,21 +538,37 @@ async function start_compiler_service(context: vscode.ExtensionContext, output: 
 
 	console.log('Connecting to the compiler service...')
 
-	await detail_provider.connect(1111)
-	await diagnostics_provider.connect(2222)
+	await detail_provider.connect(ports[0])
+	await diagnostics_provider.connect(ports[1])
 
 	console.log('Registering the completion item provider...')
 
 	// Create a compiler service and add a completion item provider which uses it
-	const detail_service = new CompilerService(detail_provider, 1111)
-	const diagnostics_service = new CompilerService(diagnostics_provider, 2222)
+	const detail_service = new CompilerService(detail_provider, ports[0])
+	const diagnostics_service = new CompilerService(diagnostics_provider, ports[1])
 
 	// Open the current workspace
-	const folder = vscode.workspace.workspaceFolders?.map(i => i.uri.path)[0] ?? '';
+	const folder = vscode.workspace.workspaceFolders?.map(i => i.uri.path)[0] ?? ''
+
 	Promise.all([ detail_service.open(folder), diagnostics_service.open(folder) ]).catch(() => {
 		vscode.window.showErrorMessage('Compiler services could not open the current workspace', { modal: true })
-	});
+	})
 
+	// Lets the user enable diagnostics
+	context.subscriptions.push(vscode.commands.registerCommand('vivid.enable-diagnostics', () => {
+		is_diagnostics_enabled = true
+		vscode.window.showInformationMessage('Diagnostics are now enabled', 'OK')
+	}))
+
+	// Lets the user disable diagnostics
+	context.subscriptions.push(vscode.commands.registerCommand('vivid.disable-diagnostics', () => {
+		is_diagnostics_enabled = false
+		diagnostics.clear()
+
+		vscode.window.showInformationMessage('Diagnostics are now disabled', 'OK')
+	}))
+
+	// Provides code completion to the user
 	context.subscriptions.push(vscode.languages.registerCompletionItemProvider(
 		{ language: 'vivid' },
 		new CompletionItemProvider(detail_service),
@@ -520,27 +577,32 @@ async function start_compiler_service(context: vscode.ExtensionContext, output: 
 		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
 	))
 
+	// Provides function signatures to the user
 	context.subscriptions.push(vscode.languages.registerSignatureHelpProvider(
 		{ language: 'vivid' },
 		new SignatureHelpProvider(detail_service),
 		'(', ','
 	))
 
+	// Lets the user access the definition of functions and variable for instance
 	context.subscriptions.push(vscode.languages.registerDefinitionProvider(
 		{ language: 'vivid' },
 		new DefinitionProvider(detail_service)
 	))
 
+	// Provides information about functions and variables when hovering over such things
 	context.subscriptions.push(vscode.languages.registerHoverProvider(
 		{ language: 'vivid' },
 		new HoverProvider(detail_service)
 	))
 
+	// Provides locations of function and variable usages to the user
 	context.subscriptions.push(vscode.languages.registerReferenceProvider(
 		{ language: 'vivid' },
 		new ReferenceProvider(detail_service)
 	))
 
+	// Lists symbols such as functions and variables to the user
 	context.subscriptions.push(vscode.languages.registerWorkspaceSymbolProvider(
 		new WorkspaceSymbolProvider(detail_service)
 	))
@@ -553,39 +615,88 @@ async function start_compiler_service(context: vscode.ExtensionContext, output: 
 
 /**
  * Executes the compiler service executable and attempts to connect to it.
- * On success, a completion item provider is registered.
- * On failure, an information box is shown to user, which directs the user to install the required components.
  */
 function execute_compiler_service(context: vscode.ExtensionContext) {
+	if (!CompilerPath) throw new Error('Missing path to the compiler')
+
+	console.log(`Firing up the compiler service by using the following compiler: ${CompilerPath}`)
+
 	// Start the compiler service
-	const service = require('child_process').spawn('Vivid.exe', [ '-s' ])
+	const service = require('child_process').spawn(CompilerPath, [ '-s' ])
 
 	if (service.pid == undefined) {
-		console.log('Could not start Vivid compiler service')
-
-		vscode.window.showErrorMessage('Could not start Vivid compiler service. Is the Vivid compiler installed on your system and is it visible to this extension?', { modal: true })
+		vscode.window.showErrorMessage(`Failed to start the compiler service by using the following compiler: ${CompilerPath}`)
 		return
 	}
 
 	// The following function should only start if the compiler service has successfully activated
-	service.stdout.on('data', (data: Buffer) => {
+	service.stdout.once('data', (data: Buffer) => {
 		const output = data.toString('utf-8')
+		console.log('Compiler service output:')
+		console.log(output)
+
 		start_compiler_service(context, output)
 	})
 }
 
 /**
+ * Returns the full path to the compiler by looking at all folders in the path.
+ * If the compiler can not be found this way, the function returns null.
+ */
+async function find_compiler() {
+	const is_windows = process.platform === 'win32'
+	const separator = is_windows ? ';' : ':'
+	const folders = process.env.PATH.split(separator)
+
+	const compiler_file_name = is_windows
+		? COMPILER_FILE_NAME_WITHOUT_EXTENSION + '.exe'
+		: COMPILER_FILE_NAME_WITHOUT_EXTENSION
+
+	for (const folder of folders) {
+		try {
+			const files = await fs.readdir(folder, { withFileTypes: true })
+
+			for (const file of files) {
+				if (file.name === compiler_file_name) return path.join(folder, file.name)
+			}
+		}
+		catch {}
+	}
+
+	return null
+}
+
+/**
  * This function activates the whole extension
  */
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
 	console.log('Vivid language extension starting...')
 
-	//execute_compiler_service(context)
-	start_compiler_service(context, "1111")
+	// Try to find the compiler
+	const compiler_path = await find_compiler()
 
-	const disposable = vscode.commands.registerCommand('extension.hello', () => {
-		vscode.window.showInformationMessage('Hello')
-	})
+	if (compiler_path === null) {
+		const actions = [ 'Install', 'Cancel' ]
+		const action = await vscode.window.showErrorMessage('Failed to find the compiler, please install it on your system.', ...actions)
 
-	context.subscriptions.push(disposable)
+		// Redirect the user to the home page of the compiler if requested
+		if (action === 'Install') {
+			vscode.window.showInformationMessage('After installing, restart the editor!')
+			await sleep(3000) // Wait for a while, so that user can read the message above
+			vscode.env.openExternal(vscode.Uri.parse(COMPILER_HOME_PAGE))
+		}
+
+		return // Do not execute any of the code below, since it requires the compiler to exist
+	}
+
+	// Save the path to the compiler
+	CompilerPath = compiler_path
+
+	if (DEBUG) {
+		console.log('Running the extension in debug mode, you need to start the compiler service manually')
+		start_compiler_service(context, DEBUG_PORTS_OUTPUT)
+	}
+	else {
+		execute_compiler_service(context)
+	}
 }
