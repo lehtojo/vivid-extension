@@ -30,6 +30,7 @@
 				"configuration": "./language-configuration.json"
 			}
 		],
+		"breakpoints": [{ "language": "vivid" }],
 		"grammars": [
 			{
 				"language": "vivid",
