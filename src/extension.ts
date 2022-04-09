@@ -461,14 +461,13 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 			const uri = vscode.Uri.file(response.Path)
 			const items = JSON.parse(response.Data) as DocumentDiagnostic[]
 
-			if (uri === undefined || items === undefined) return
+			if (uri === undefined || items === undefined || !is_diagnostics_enabled) return
 
 			diagnostics.set(uri, items.map(i => to_internal_diagnostic(i)))
 		}
-		catch {}
-
-		is_diagnosed = true
-
+		finally {
+			is_diagnosed = true
+		}
 	}, DIAGNOSTICS_TIMER_PRECISION)
 
 	// Create the diagnostics signaler
