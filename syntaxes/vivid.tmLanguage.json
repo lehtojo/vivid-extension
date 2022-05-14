@@ -39,6 +39,11 @@
 		"comments": {
 			"patterns": [
 				{
+					"match": "^\\s*#warning\\ ",
+					"description": "Warning",
+					"name": "invalid.illegal"
+				},
+				{
 					"match": "\\'[^']*\\'",
 					"name": "string.quoted.double"
 				},

@@ -346,7 +346,7 @@ class WorkspaceSymbolProvider implements vscode.WorkspaceSymbolProvider {
 }
 
 var diagnostics: vscode.DiagnosticCollection
-var is_diagnostics_enabled = true
+var is_diagnostics_enabled = false
 
 /**
  * Returns whether the specified character is a character
