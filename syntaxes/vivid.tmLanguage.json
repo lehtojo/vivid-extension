@@ -48,6 +48,10 @@
 					"name": "string.quoted.double"
 				},
 				{
+					"match": "\\\"[^\"]*\\\"",
+					"name": "string.quoted.double"
+				},
+				{
 					"match": "\\`[^`]*\\`",
 					"name": "string.quoted.double"
 				},
@@ -87,7 +91,7 @@
 				"match": "(as|is)\\ +(\\w+)(?=\\ *[^\\w\\<\\ ])",
 				"captures": {
 					"1": {
-						"name": "keyword.operator"
+						"name": "keyword.control"
 					},
 					"2": {
 						"name": "entity.name.type"
@@ -100,7 +104,7 @@
 				{
 					"name": "keyword.control",
 					"description": "Keywords",
-					"match": "\\b(and|or|as|constant|continue|compiles|deinit|else|export|false|has|if|import|in|init|inline|is|loop|nameof|namespace|none|not|override|outline|pack|plain|private|protected|public|readonly|return|sizeof|static|stop|super|this|true|virtual|when)\\b"
+					"match": "\\b(action|and|or|as|constant|continue|compiles|deinit|else|export|false|has|if|import|in|init|inline|is|loop|nameof|mutating|namespace|none|not|open|outline|override|pack|plain|private|protected|public|readable|return|shared|sizeof|strideof|stop|super|this|true|when)\\b"
 				},
 				{
 					"name": "keyword.control",
@@ -157,7 +161,7 @@
 		"general": {
 			"patterns": [
 				{
-					"match": "\\.\\(([^\\(\\)]*)\\)",
+					"match": "[^\\.]\\.\\(([^\\(\\)]*)\\)",
 					"description": "Cast",
 					"captures": {
 						"1": {
