@@ -437,7 +437,7 @@ function create_diagnostics_handler(diagnostics_service: CompilerService) {
 	var diagnose = false
 	var is_diagnosed = true
 
-	// Creat the timer which decides whether to send the request to get the diagnostics
+	// Create the timer which decides whether to send the request to get the diagnostics
 	setInterval(async () => {
 		if (!is_diagnostics_enabled) return
 
