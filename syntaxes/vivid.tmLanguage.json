@@ -5,8 +5,9 @@
 		{ "include": "#template_arguments" },
 		{ "include": "#comments" },
 		{ "include": "#constants" },
+		{ "include": "#higher-priority-expressions" },
 		{ "include": "#keywords" },
-		{ "include": "#general" },
+		{ "include": "#expressions" },
 		{ "include": "#primitives" }
 	],
 	"repository": {
@@ -83,10 +84,11 @@
 				}
 			]
 		},
-		"normal_cast": {
+		"higher-priority-expressions": {
 			"patterns": [
 				{
-					"match": "(as|is)\\ +([\\w<>. ]+)",
+					"match": "(as|is not|is) +([\\w<>\\. ]+)",
+					"description": "as/is -expression",
 					"captures": {
 						"1": {
 							"name": "keyword.control"
@@ -117,25 +119,8 @@
 				}
 			]
 		},
-		"general": {
+		"expressions": {
 			"patterns": [
-				{
-					"match": "(as|is)\\ +([\\w<>. ]+)",
-					"description": "as/is -expression",
-					"captures": {
-						"1": {
-							"name": "keyword.control"
-						},
-						"2": {
-							"patterns": [
-								{
-									"match": "\\w+",
-									"name": "entity.name.type"
-								}
-							]
-						}
-					}
-				},
 				{
 					"match": "\\.{0,1}(\\w+)\\ *(\\()",
 					"description": "Function call",
@@ -213,6 +198,16 @@
 							"name": "entity.name.function"
 						}
 					}
+				},
+				{
+					"match": "\\) *(using) ",
+					"description": "Using-expression",
+					"captures": {
+						"1": {
+							"name": "keyword.control"
+						}
+					}
+
 				}
 			]
 		},
