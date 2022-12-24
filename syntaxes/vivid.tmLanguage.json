@@ -80,7 +80,7 @@
 				},
 				{
 					"name": "constant.numeric.hex",
-					"match": "\\b((0[xh][0-9a-fA-F\\_]+)|([0-9a-fA-F\\_]+[hH]))\\b"
+					"match": "\\b((0[xhb][0-9a-fA-F\\_]+)|([0-9a-fA-F\\_]+[hHb]))\\b"
 				}
 			]
 		},
