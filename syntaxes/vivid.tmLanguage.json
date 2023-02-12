@@ -37,9 +37,14 @@
 		"comments": {
 			"patterns": [
 				{
-					"match": "^\\s*#warning\\ .*",
-					"description": "Warning",
+					"match": "(?i)^\\s*#\\ *(Warning|Error)[^\\w].*",
+					"description": "Warning/Error",
 					"name": "invalid.illegal"
+				},
+				{
+					"match": "(?i)^\\s*#\\ *Todo[^\\w].*",
+					"description": "Todo",
+					"name": "markup.italic"
 				},
 				{
 					"match": "'[^']*\\\\(?=')|'[^']*'",
@@ -131,7 +136,7 @@
 					}
 				},
 				{
-					"match": "(\\w+)\\ *:\\ *([\\w<>,.\\*\\ ]+)",
+					"match": "(\\w+)\\ *:\\ *([\\w\\.]+(?=[^<]))?",
 					"description": "Variable declaration",
 					"captures": {
 						"1": {
