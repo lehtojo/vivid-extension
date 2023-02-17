@@ -37,14 +37,9 @@
 		"comments": {
 			"patterns": [
 				{
-					"match": "(?i)^\\s*#\\ *(Warning|Error)[^\\w].*",
+					"match": "(?i)^\\s*#\\ *(Todo|Warning|Error)[^\\w].*",
 					"description": "Warning/Error",
 					"name": "invalid.illegal"
-				},
-				{
-					"match": "(?i)^\\s*#\\ *Todo[^\\w].*",
-					"description": "Todo",
-					"name": "markup.italic"
 				},
 				{
 					"match": "'[^']*\\\\(?=')|'[^']*'",
@@ -92,7 +87,7 @@
 		"higher-priority-expressions": {
 			"patterns": [
 				{
-					"match": "(as|is not|is) +([\\w<>,.\\*\\ ]+)",
+					"match": "(as|is not|is) +([\\w\\.]+(?=[^<]))?",
 					"description": "as/is -expression",
 					"captures": {
 						"1": {
