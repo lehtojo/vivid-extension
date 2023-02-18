@@ -24,6 +24,10 @@
 					"Vivid",
 					"vivid"
 				],
+				"icon": {
+					"dark": "./icons/icon-dark.png",
+					"light": "./icons/icon-light.png"
+				},
 				"extensions": [
 					".v"
 				],
