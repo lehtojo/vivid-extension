@@ -37,7 +37,7 @@
 		"comments": {
 			"patterns": [
 				{
-					"match": "(?i)^\\s*#\\ *(Todo|Warning|Error)[^\\w].*",
+					"match": "#\\ *(Todo|Warning|Error)[^\\w].*",
 					"description": "Warning/Error",
 					"name": "invalid.illegal"
 				},
@@ -110,7 +110,7 @@
 				{
 					"name": "keyword.control",
 					"description": "Keywords",
-					"match": "\\b(action|and|or|as|constant|continue|compiles|deinit|else|export|false|has|if|import|in|init|inline|is|loop|nameof|mutating|namespace|none|not|open|outline|override|pack|plain|private|protected|public|readable|return|shared|sizeof|strideof|stop|super|this|true|when)\\b"
+					"match": "\\b(action|and|or|as|constant|continue|compiles|deinit|else|export|global|false|finally|has|if|import|in|init|inline|is|loop|nameof|mutating|namespace|none|not|open|outline|override|pack|plain|private|protected|public|readable|return|shared|sizeof|strideof|stop|super|this|true|when)\\b"
 				},
 				{
 					"name": "keyword.control",
@@ -121,6 +121,15 @@
 		},
 		"expressions": {
 			"patterns": [
+				{
+					"match": "(\\${0,1}\\w+\\!)\\(",
+					"description": "Macro definition or usage",
+					"captures": {
+						"1": {
+							"name": "keyword.control"
+						}
+					}
+				},
 				{
 					"match": "\\.{0,1}(\\w+)\\ *(\\()",
 					"description": "Function call",
